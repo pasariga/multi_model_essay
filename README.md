@@ -60,6 +60,8 @@ In a second terminal, run `npm install`, copy `.env.example` to `.env`, and run 
 
 [Deployment notes](DEPLOYMENT.md) · [Offline and live testing](backend/TESTING.md) · [Historical implementation details](docs/IMPLEMENTATION.zh-CN.md)
 
+[Contributing and PR checks](CONTRIBUTING.md) · [Release authorization and ECS prerequisites](docs/RELEASE_SECURITY.zh-CN.md). Merging a PR does not deploy production.
+
 ## Status, provenance and license
 
 This documentation review did not deploy the application, run paid services or establish new performance/accuracy results. Hosting availability and continued maintenance are not established by a restored source repository.

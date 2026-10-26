@@ -2,9 +2,19 @@
 
 Production deployments use this path:
 
-`main push -> GitHub Actions -> restricted SSH key -> server deploy wrapper -> deploy/deploy.sh`
+`PR -> owner review + Web CI -> merge main -> successful main CI -> owner dispatches exact SHA -> production approval -> restricted SSH wrapper -> deploy/deploy.sh`
 
-The production server currently uses `/opt/wenheng-production`. Secrets remain
+There is no push-triggered production deployment. Development branches and main
+pushes run CI only. The production environment variable
+`WENHENG_PRODUCTION_DEPLOY_ENABLED` is currently `false`; leave it disabled until
+the existing ECS identity and deployment account privileges have been verified.
+The GitHub workflow is prepared, but ECS access and actual least privilege have
+not been verified in this setup. No production release was executed.
+
+See [collaboration](../CONTRIBUTING.md) and
+[release authorization, ECS checklist and private-repository fallback](../docs/RELEASE_SECURITY.zh-CN.md).
+
+Historical deployment documentation records `/opt/wenheng-production`. Secrets remain
 outside the checkout in `/opt/wenheng-secrets/production.env`; the server-only
 Compose override remains in `/opt/wenheng-secrets/compose.server.yaml`.
 
@@ -23,7 +33,18 @@ GitHub. They are read only from the production server.
 
 ## Deployment safety
 
-- The workflow deploys only the exact commit that triggered the `main` push.
+- Only `pasariga` can use the production workflow on `main`.
+- Dispatch requires an exact current main SHA with a successful main-push Web CI run.
+- `validate-only` never uses production secrets or connects to ECS.
+- `deploy` also requires production environment approval and the independently
+  enabled readiness switch. A stale SHA is rejected after approval.
+- The environment only accepts the `main` branch and only the owner is a reviewer.
+- Repository-level secrets and production-connected self-hosted runners must not
+  be added. Collaborators must not receive root or production SSH credentials.
+- The credential-bearing job does not check out code, install dependencies, or
+  execute repository scripts on the runner.
+- The following server-side behavior is documented in existing scripts; the
+  current server, restricted SSH wrapper and permissions still require inspection:
 - A server lock prevents overlapping deployments.
 - A dirty server checkout stops deployment instead of overwriting local files.
 - Git updates are fast-forward only.

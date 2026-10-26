@@ -60,6 +60,8 @@ Copy-Item .env.example .env
 
 [部署说明](DEPLOYMENT.md) · [离线与真实服务测试](backend/TESTING.md) · [历史实现资料](docs/IMPLEMENTATION.zh-CN.md)
 
+[多人协作与 PR 检查](docs/COLLABORATION.zh-CN.md) · [发布授权与 ECS 待确认项](docs/RELEASE_SECURITY.zh-CN.md)。合并 PR 不会自动部署生产网站。
+
 ## 状态、来源与许可
 
 本轮文档整理没有部署应用、运行付费服务或新增性能／准确率结论。恢复源码本身不能证明在线服务可用或项目持续维护。

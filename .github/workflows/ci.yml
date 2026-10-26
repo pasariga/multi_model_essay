@@ -1,0 +1,99 @@
+name: Web CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'feature/**', 'fix/**', 'docs/**', 'chore/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+      - run: npm run type-check
+      - run: npm run build
+
+  backend:
+    name: Backend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: wenheng_ci
+          POSTGRES_USER: wenheng_ci
+          POSTGRES_PASSWORD: disposable-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wenheng_ci -d wenheng_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://wenheng_ci:disposable-ci-only@127.0.0.1:5432/wenheng_ci
+      TEST_DATABASE_URL: postgresql+asyncpg://wenheng_ci:disposable-ci-only@127.0.0.1:5432/wenheng_ci
+      OCR_WORKER_ENABLED: 'false'
+      OCR_DEFAULT_ENGINE: baidu
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Prepare web-test dependencies without optional Paddle runtime
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          excluded = ('paddleocr==', 'paddlepaddle==')
+          lines = Path('requirements.txt').read_text().splitlines()
+          lines = [line for line in lines if not line.startswith(excluded)]
+          Path('/tmp/wenheng-ci-requirements.txt').write_text('\n'.join(lines) + '\npytest==8.3.4\nnumpy<2\n')
+          PY
+          python -m pip install -r /tmp/wenheng-ci-requirements.txt
+      - name: Check Python syntax
+        run: python -m compileall -q app tests migrations
+      - name: Migrate disposable CI database
+        run: python -m alembic upgrade head
+      - name: Run web backend unit and integration tests
+        run: python -m pytest tests -q
+
+  safety:
+    name: Repository safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check tracked files for accidental credentials
+        run: python .github/scripts/repository_safety.py
+      - name: Check deployment shell syntax without executing it
+        run: bash -n deploy/deploy.sh

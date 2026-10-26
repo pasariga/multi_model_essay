@@ -1,68 +1,105 @@
 name: Deploy production
 
+# No push, PR, tag, release, or workflow_run trigger can deploy production.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character current main SHA with successful Web CI
+        required: true
+        type: string
+      mode:
+        description: Validate only until ECS permissions are independently verified
+        required: true
+        default: validate-only
+        type: choice
+        options: [validate-only, deploy]
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: wenheng-production
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Validate authorized release
+    if: github.actor == 'pasariga' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.validate.outputs.sha }}
+    steps:
+      # No source checkout or repository script executes in this job.
+      - name: Validate exact main commit and successful main CI
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Expected a full lowercase commit SHA'; exit 1; }
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          [[ "$RELEASE_SHA" == "$current_main" && "$RELEASE_SHA" == "$GITHUB_SHA" ]] || {
+            echo 'Release must match both current main and the dispatched workflow commit'; exit 1;
+          }
+          passed="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$RELEASE_SHA&event=push&status=success" --jq '.total_count')"
+          [[ "$passed" -gt 0 ]] || { echo 'No successful main-push Web CI run for this commit'; exit 1; }
+          echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          printf 'Validated commit `%s`. Validation does not contact ECS.\n' "$RELEASE_SHA" >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
-    name: Deploy to Aliyun
+    name: Owner-approved ECS deployment
+    needs: preflight
+    if: inputs.mode == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
-
     steps:
-      - name: Validate required secrets
+      # No third-party actions, source checkout, dependency installation, or
+      # repository scripts execute on the runner with the SSH credential.
+      - name: Require independently verified ECS readiness
         env:
-          SSH_HOST: ${{ secrets.ALIYUN_HOST }}
-          SSH_PORT: ${{ secrets.ALIYUN_SSH_PORT }}
-          SSH_USER: ${{ secrets.ALIYUN_SSH_USER }}
+          DEPLOY_ENABLED: ${{ vars.WENHENG_PRODUCTION_DEPLOY_ENABLED }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$DEPLOY_ENABLED" == 'true' ]] || {
+            echo 'Production deployment is disabled pending ECS identity and privilege verification'; exit 1;
+          }
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          [[ "$RELEASE_SHA" == "$current_main" ]] || { echo 'main changed while awaiting approval; validate a new release'; exit 1; }
+      - name: Configure restricted SSH credential
+        env:
           SSH_PRIVATE_KEY: ${{ secrets.ALIYUN_SSH_PRIVATE_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.ALIYUN_SSH_KNOWN_HOSTS }}
         run: |
           set -Eeuo pipefail
-          for name in SSH_HOST SSH_PORT SSH_USER SSH_PRIVATE_KEY SSH_KNOWN_HOSTS; do
-            if [[ -z "${!name}" ]]; then
-              echo "Missing required GitHub Actions secret: ${name}" >&2
-              exit 1
-            fi
-          done
-
-      - name: Configure SSH
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.ALIYUN_SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.ALIYUN_SSH_KNOWN_HOSTS }}
-        run: |
-          set -Eeuo pipefail
+          [[ -n "$SSH_PRIVATE_KEY" && -n "$SSH_KNOWN_HOSTS" ]]
           install -d -m 700 ~/.ssh
-          printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/wenheng-production
-          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/wenheng-production
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/wenheng-production ~/.ssh/known_hosts
-
-      - name: Deploy pushed commit
+      - name: Request the existing server deploy wrapper
         env:
           SSH_HOST: ${{ secrets.ALIYUN_HOST }}
           SSH_PORT: ${{ secrets.ALIYUN_SSH_PORT }}
           SSH_USER: ${{ secrets.ALIYUN_SSH_USER }}
+          RELEASE_SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           set -Eeuo pipefail
-          ssh \
-            -i ~/.ssh/wenheng-production \
-            -p "${SSH_PORT}" \
-            -o BatchMode=yes \
-            -o ConnectTimeout=15 \
-            -o IdentitiesOnly=yes \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=3 \
-            -o StrictHostKeyChecking=yes \
-            "${SSH_USER}@${SSH_HOST}" \
-            "deploy:${GITHUB_SHA}"
+          [[ -n "$SSH_HOST" && -n "$SSH_USER" && "$SSH_PORT" =~ ^[0-9]{1,5}$ ]]
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          ssh -i ~/.ssh/wenheng-production -p "$SSH_PORT" \
+            -o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes -o ClearAllForwardings=yes \
+            "$SSH_USER@$SSH_HOST" "deploy:$RELEASE_SHA"
+      - name: Remove temporary SSH files
+        if: always()
+        run: rm -f ~/.ssh/wenheng-production ~/.ssh/known_hosts
